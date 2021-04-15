@@ -9,6 +9,7 @@ capturer.startCapture(videoWidth, videoHeight, videoFps);
 
 主要用到了两个类`VideoCapture`和`VideoSource`：  
 ### VideoCapture
+![VideoCapture](images/VideoCapture.jpg)
 VideoCapture是WebRTC提供的视频采集接口类，开发者可以实现这个接口将采集到的视频帧传递给底层。接口定义如下：  
 ```java
 public interface VideoCapturer {
@@ -55,6 +56,8 @@ public class VideoFrame implements RefCounted {
 }
 ```
 `Buffer`也是一个接口类，定义了如视频帧宽、高，裁剪等接口；而数据内容需要转换为I420格式：  
+![Buffer](images/Buffer.jpg)
+接口定义如下：
 ```java
 public interface Buffer extends RefCounted {
     /**
@@ -86,4 +89,13 @@ public interface Buffer extends RefCounted {
 ### VideoSource
 VideoCapture的核心是调用`CapturerObserver`的`onFrameCaptured`接口传递视频帧数据。而VideoSource主要就是对`CapturerObserver`的实现和对`NativeAndroidVideoTrackSource`的封装。  
 
-VideoSource的创建是通过`PeerConnectionFactory`的静态方法`createVideoSource`，主要是通过JNI接口创建一个`NativeAndroidVideoTrackSource`的实例。具体实现代码在`peer_connection_factory.cc -> JNI_PeerConnectionFactory_CreateVideoSource`。
+VideoSource的创建是通过`PeerConnectionFactory`的静态方法`createVideoSource`，主要是通过JNI接口创建一个`NativeAndroidVideoTrackSource`的实例。具体实现代码在`peer_connection_factory.cc -> JNI_PeerConnectionFactory_CreateVideoSource`。  
+
+视频采集数据的传递过程如下图：  
+![视频数据传递](images/视频采集分发流程.png)
+在VideoBroadcaster中包含一个`std::vector<SinkPair>`，存储了需要分发的sink对象，通过AddOrUpdateSink和RemoveSink函数来添加和删除。    
+![VideoBroadcaster](images/VideoBroadcaster.jpg) 
+
+### VideoStreamEncoder
+在`VideoBroadcaster`中包含的VideoSink主要是`VideoStreamEncoder`和本地视频预览的渲染类。
+`VideoStreamEncoder`是视频编码器，接收原始视频帧数据，输出编码后的流数据。
