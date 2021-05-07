@@ -1,5 +1,5 @@
 ## 视频采集
-视频采集接口的使用大致如下：  
+视频采集接口的使用方式大致如下：  
 ```java
 VideoCapturer capturer = createVideoCapture()
 videoSource = factory.createVideoSource(capturer.isScreencast());
@@ -183,5 +183,78 @@ bool WebRtcVideoChannel::SetSendParameters(const VideoSendParameters& params) {
 ```
 看到这里会生成一个`negotiated_codecs`列表，里面保存的是所有匹配上的codec参数。但是会将这个队列的第一个codec参数保存在`changed_params`的`send_codec`成员变量里，后续创建编码器就用的是这个参数。  
 
-接下来看一下**编码器与VideoTrack的关联**：  
-![编码器关联](images/编码器关联VideoTrack.png)
+接下来看一下**编码器与VideoTrack的关联**。关联是在创建编码器之后进行，最终将`VideoStreamEncoder`作为Sink添加到VideoBroadcaster的Sink列表中。
+![编码器关联](images/编码器关联VideoTrack.png)  
+
+#### 编码器初始化
+前文中介绍过，`VideoStreamEncoder`的创建是在`VideoSendStream`的构造函数中，之后紧接着会调用`ConfigureEncoder`进行编码器的初始化：
+```c++
+void VideoStreamEncoder::ConfigureEncoder(VideoEncoderConfig config,
+                                          size_t max_data_payload_length) {
+  encoder_queue_.PostTask(
+      [this, config = std::move(config), max_data_payload_length]() mutable {
+        RTC_DCHECK_RUN_ON(&encoder_queue_);
+        RTC_DCHECK(sink_);
+        RTC_LOG(LS_INFO) << "ConfigureEncoder requested.";
+
+        pending_encoder_creation_ =
+            (!encoder_ || encoder_config_.video_format != config.video_format ||
+             max_data_payload_length_ != max_data_payload_length);
+        encoder_config_ = std::move(config);
+        max_data_payload_length_ = max_data_payload_length;
+        //初始化的关键在这个参数上
+        pending_encoder_reconfiguration_ = true;
+
+        
+        if (last_frame_info_) {
+          ReconfigureEncoder();
+        } else {
+          //正常流程会走到这里
+          codec_info_ = settings_.encoder_factory->QueryVideoEncoder(
+              encoder_config_.video_format);
+          //这个判断一般也走不进去
+          if (HasInternalSource()) {
+            last_frame_info_ = VideoFrameInfo(kDefaultInputPixelsWidth,
+                                              kDefaultInputPixelsHeight, false);
+            ReconfigureEncoder();
+          }
+        }
+      });
+}
+```
+初始化编码器的主要代码实现是在`ReconfigureEncoder()`这个函数中，实际运行中发现，在创建编码器的时候其实并不会直接初始化，而是通过`pending_encoder_reconfiguration_`变量控制，在后面`onFrame`第一帧到达时才会真正调用`ReconfigureEncoder()`。调用路径为：`onFrame -> MaybeEncodeVideoFrame -> ReconfigureEncoder`。  
+
+在`ReconfigureEncoder`中，最关键的一步是创建`VideoEncoder`，流程如下：
+![创建VideoEncoder](images/创建VideoEncoder.png)
+最终会调回到Java层的`VideoEncoderFactory`接口类，而这个接口类的实例创建是在创建`PeerConnectionFactory`的时候由开发者指定的，我们的demo中使用的是`DefaultVideoEncoderFactory`：
+```kotlin
+val encoderFactory = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, false)
+val decoderFactory = DefaultVideoDecoderFactory(eglBase.eglBaseContext)
+val adm = createJavaAudioDevice()
+pcFactory = PeerConnectionFactory.builder()
+    .setVideoEncoderFactory(encoderFactory)
+    .setVideoDecoderFactory(decoderFactory)
+    .setAudioDeviceModule(adm)
+    .createPeerConnectionFactory()
+```
+
+在`DefaultVideoEncoderFactory.createEncoder`中会同时创建软件编码器和硬件编码器，优先使用硬件编码器：
+```java
+public VideoEncoder createEncoder(VideoCodecInfo info) {
+    final VideoEncoder softwareEncoder = softwareVideoEncoderFactory.createEncoder(info);
+    final VideoEncoder hardwareEncoder = hardwareVideoEncoderFactory.createEncoder(info);
+    if (hardwareEncoder != null && softwareEncoder != null) {
+      // Both hardware and software supported, wrap it in a software fallback
+      return new VideoEncoderFallback(
+          /* fallback= */ softwareEncoder, /* primary= */ hardwareEncoder);
+    }
+    return hardwareEncoder != null ? hardwareEncoder : softwareEncoder;
+  }
+```
+
+#### 编码流程
+最后来看一下一帧图像数据编码的过程：
+![编码流程](images/编码流程.png)
+* `MaybeEncodeVideoFrame`中经过一系列复杂条件判断是否需要丢帧
+* `EncodeVideoFrame`中经过buffer格式转换（最终转换为I420格式数据）、图像裁剪，最终调用之前创建好的VideoEncoder进行Encode。
+最终会调回到Java层的VideoEncoder实例进行编码，这里主要看`HardwareVideoEncoder`，后面就是直接丢进MediaCodec进行编码，这里就不再过多阐述。
